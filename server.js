@@ -1,60 +1,56 @@
 // Minimal MCP WebSocket server (JSON-RPC 2.0 over WS)
 // Tools: proximus.kpis, proximus.records
-// Pulls rows from DEMO_API_URL (demo app /api/data) using X-API-Key
+// Pulls rows from DEMO_API_URL (/api/data) using X-API-Key
 
 const http = require("http");
 const url = require("url");
 const express = require("express");
 const cors = require("cors");
-const fetch = (...args) => import("node-fetch").then(({ default: f }) => f(...args));
 const WebSocket = require("ws");
-const crypto = require("crypto");
+const fetch = (...args) =>
+  import("node-fetch").then(({ default: f }) => f(...args));
 
 const PORT = process.env.PORT || 8080;
 
-// ---- Integration with your demo app ----
+// --- Demo app integration
 const DEMO_API_URL = process.env.DEMO_API_URL; // e.g. https://<demo>.onrender.com/api/data
-const DEMO_API_KEY = process.env.DEMO_API_KEY; // send as X-API-Key to demo
+const DEMO_API_KEY = process.env.DEMO_API_KEY; // shared secret sent as X-API-Key
 
-// ---- (Optional) Bearer auth for WS clients (ChatGPT MCP Connector) ----
+// --- Optional bearer auth for WS clients
 const MCP_REQUIRE_KEY = (process.env.MCP_REQUIRE_KEY || "false").toLowerCase() === "true";
 const MCP_API_KEY = process.env.MCP_API_KEY || null;
 
-// ---- Express just for health check ----
 const app = express();
 app.disable("x-powered-by");
 app.use(cors());
+
+// Health + simple root (lets HTTPS validators succeed)
 app.get("/healthz", (_req, res) => res.send("ok"));
-
-const server = http.createServer(app);
-
-// ---- WebSocket endpoint for MCP ----
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.json({
     message: "Proximus MCP ready. This endpoint upgrades to WebSocket for MCP protocol.",
     wsPath: "/mcp"
   });
 });
 
-// --- WebSocket upgrade handler ---
-server.on("upgrade", (req, socket, head) => {
-  const pathname = url.parse(req.url).pathname;
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ noServer: true });
 
-  // accept both "/" and "/mcp" for convenience
+// WS upgrade handler; accept "/" and "/mcp"
+server.on("upgrade", (req, socket, head) => {
+  const { pathname, query } = url.parse(req.url, true);
+
   if (pathname !== "/" && pathname !== "/mcp") {
     socket.destroy();
     return;
   }
 
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit("connection", ws, req);
-  });
-});
-
   // Optional auth: Authorization: Bearer <token> OR ?key=<token>
   if (MCP_REQUIRE_KEY) {
     const auth = req.headers["authorization"] || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : (query?.key || "");
+    const token = auth.startsWith("Bearer ")
+      ? auth.slice(7)
+      : (query && query.key) || "";
     const ok = token && MCP_API_KEY && token === MCP_API_KEY;
     if (!ok) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
@@ -68,7 +64,7 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
-// ---- Helpers ----
+// ---- Helpers
 function jsonrpcResult(id, result) {
   return JSON.stringify({ jsonrpc: "2.0", id, result });
 }
@@ -79,17 +75,15 @@ function asNumber(n, def) {
   const x = parseInt(n, 10);
   return Number.isFinite(x) ? x : def;
 }
-
-// Fetch rows from demo app with filters
 async function fetchRows(filters = {}, limit = 1000) {
   if (!DEMO_API_URL) throw new Error("DEMO_API_URL not set");
   const qs = new URLSearchParams();
   if (filters.country) qs.set("country", String(filters.country));
   if (filters.status) qs.set("status", String(filters.status));
   qs.set("limit", String(limit));
-  const url = DEMO_API_URL.replace(/\/?$/, "") + "?" + qs.toString();
+  const u = DEMO_API_URL.replace(/\/?$/, "") + "?" + qs.toString();
 
-  const resp = await fetch(url, {
+  const resp = await fetch(u, {
     headers: {
       Accept: "application/json",
       ...(DEMO_API_KEY ? { "X-API-Key": DEMO_API_KEY } : {}),
@@ -101,7 +95,6 @@ async function fetchRows(filters = {}, limit = 1000) {
   }
   return await resp.json();
 }
-
 function computeKpis(rows) {
   const total = rows.length;
   const delivered = rows.filter((r) => r.status === "DELIVERED").length;
@@ -111,21 +104,19 @@ function computeKpis(rows) {
   return { total, delivered, failed, blocked, avgLatency };
 }
 
-// ---- MCP session ----
+// ---- MCP session
 wss.on("connection", (ws) => {
-  // Basic keepalive
   const pingIv = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) ws.ping();
   }, 30000);
-
   ws.on("close", () => clearInterval(pingIv));
+  ws.on("error", () => {});
 
   ws.on("message", async (msg) => {
     let req;
     try {
       req = JSON.parse(msg.toString());
     } catch {
-      // Not JSON-RPC — ignore
       return;
     }
 
@@ -133,64 +124,50 @@ wss.on("connection", (ws) => {
     if (!method) return;
 
     try {
-      // --- MCP handshake: initialize ---
+      // Handshake
       if (method === "initialize") {
-        // minimal MCP response
         const result = {
-          protocolVersion: "2024-11-05", // nominal string; clients ignore exact date
-          serverInfo: {
-            name: "proximus-mcp",
-            version: "1.0.0",
-          },
-          capabilities: {
-            tools: {}, // we support tools/list and tools/call
-          },
+          protocolVersion: "2024-11-05",
+          serverInfo: { name: "proximus-mcp", version: "1.0.0" },
+          capabilities: { tools: {} }
         };
         ws.send(jsonrpcResult(id, result));
         return;
       }
 
-      // --- Tool discovery ---
+      // List tools
       if (method === "tools/list") {
         const tools = [
           {
             name: "proximus.kpis",
-            description:
-              "Compute delivery KPIs from the Proximus demo data (sourced from /api/data).",
-            inputSchema: {
-              type: "object",
-              properties: {
-                country: { type: "string", description: "2-letter country code" },
-                status: {
-                  type: "string",
-                  enum: ["DELIVERED", "FAILED", "BLOCKED", "PENDING"],
-                },
-                limit: { type: "integer", minimum: 1, maximum: 1000, default: 1000 },
-              },
-            },
-          },
-          {
-            name: "proximus.records",
-            description:
-              "Return up to 'limit' records from the Proximus demo data (for custom analysis).",
+            description: "Compute delivery KPIs from the Proximus demo data (/api/data).",
             inputSchema: {
               type: "object",
               properties: {
                 country: { type: "string" },
-                status: {
-                  type: "string",
-                  enum: ["DELIVERED", "FAILED", "BLOCKED", "PENDING"],
-                },
-                limit: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-              },
-            },
+                status: { type: "string", enum: ["DELIVERED","FAILED","BLOCKED","PENDING"] },
+                limit: { type: "integer", minimum: 1, maximum: 1000, default: 1000 }
+              }
+            }
           },
+          {
+            name: "proximus.records",
+            description: "Return up to 'limit' records from the demo data for analysis.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                country: { type: "string" },
+                status: { type: "string", enum: ["DELIVERED","FAILED","BLOCKED","PENDING"] },
+                limit: { type: "integer", minimum: 1, maximum: 1000, default: 200 }
+              }
+            }
+          }
         ];
         ws.send(jsonrpcResult(id, { tools }));
         return;
       }
 
-      // --- Tool execution ---
+      // Call tool
       if (method === "tools/call") {
         const { name, arguments: args = {} } = params || {};
         if (!name) {
@@ -198,7 +175,6 @@ wss.on("connection", (ws) => {
           return;
         }
 
-        // Normalize inputs
         const filters = {};
         if (args.country) filters.country = String(args.country);
         if (args.status) filters.status = String(args.status);
@@ -207,39 +183,20 @@ wss.on("connection", (ws) => {
         if (name === "proximus.kpis") {
           const rows = await fetchRows(filters, limit);
           const k = computeKpis(rows);
-          // Return as text content (widely supported by clients)
-          ws.send(
-            jsonrpcResult(id, {
-              content: [
-                {
-                  type: "text",
-                  text:
-                    "KPIs (from demo data): " +
-                    JSON.stringify(k),
-                },
-              ],
-              // Some clients also look for a JSON blob:
-              data: k,
-            })
-          );
+          ws.send(jsonrpcResult(id, {
+            content: [{ type: "text", text: "KPIs: " + JSON.stringify(k) }],
+            data: k
+          }));
           return;
         }
 
         if (name === "proximus.records") {
           const rows = await fetchRows(filters, limit);
-          ws.send(
-            jsonrpcResult(id, {
-              content: [
-                {
-                  type: "text",
-                  text:
-                    "Records (subset) from demo data: " +
-                    JSON.stringify(rows.slice(0, limit)),
-                },
-              ],
-              data: rows.slice(0, limit),
-            })
-          );
+          const subset = rows.slice(0, limit);
+          ws.send(jsonrpcResult(id, {
+            content: [{ type: "text", text: "Records: " + JSON.stringify(subset) }],
+            data: subset
+          }));
           return;
         }
 
@@ -247,24 +204,20 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // --- Optional: basic ping/pong via JSON-RPC ---
+      // Optional ping
       if (method === "ping") {
         ws.send(jsonrpcResult(id, { ok: true }));
         return;
       }
 
-      // Unimplemented
       ws.send(jsonrpcError(id, -32601, `Unknown method: ${method}`));
     } catch (e) {
       ws.send(jsonrpcError(id, -32000, "Internal error", String(e?.message || e)));
     }
   });
-
-  // Some clients send notifications like "initialized"
-  ws.on("error", () => {});
 });
 
 server.listen(PORT, () => {
-  console.log(`MCP WS listening on :${PORT} (path /mcp)`);
+  console.log(`MCP WS listening on :${PORT} (paths / and /mcp)`);
   console.log(`Health: GET http://0.0.0.0:${PORT}/healthz`);
 });
