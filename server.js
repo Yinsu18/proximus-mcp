@@ -34,8 +34,14 @@ app.get("/", (_req, res) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ noServer: true });
-
+const wss = new WebSocket.Server({
+  noServer: true,
+  handleProtocols: (protocols /* Set<string> */, req) => {
+    if (protocols.includes('mcp')) return 'mcp';
+    if (protocols.includes('jsonrpc')) return 'jsonrpc';
+    return false; // no match; some clients will still proceed without a subprotocol
+  }
+});
 // --- WebSocket upgrade handler; accept "/" and "/mcp" and negotiate subprotocol
 server.on("upgrade", (req, socket, head) => {
   const { pathname, query } = url.parse(req.url, true);
