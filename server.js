@@ -29,16 +29,27 @@ app.get("/healthz", (_req, res) => res.send("ok"));
 const server = http.createServer(app);
 
 // ---- WebSocket endpoint for MCP ----
-const wss = new WebSocket.Server({ noServer: true });
+app.get("/", (req, res) => {
+  res.json({
+    message: "Proximus MCP ready. This endpoint upgrades to WebSocket for MCP protocol.",
+    wsPath: "/mcp"
+  });
+});
 
-app.get("/", (req, res) => res.send("MCP WS server ready. Connect via /mcp (WebSocket)."));
+// --- WebSocket upgrade handler ---
 server.on("upgrade", (req, socket, head) => {
-  const { pathname, query } = url.parse(req.url, true);
+  const pathname = url.parse(req.url).pathname;
 
-  if (pathname !== "/mcp") {
+  // accept both "/" and "/mcp" for convenience
+  if (pathname !== "/" && pathname !== "/mcp") {
     socket.destroy();
     return;
   }
+
+  wss.handleUpgrade(req, socket, head, (ws) => {
+    wss.emit("connection", ws, req);
+  });
+});
 
   // Optional auth: Authorization: Bearer <token> OR ?key=<token>
   if (MCP_REQUIRE_KEY) {
