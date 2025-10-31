@@ -31,6 +31,7 @@ const server = http.createServer(app);
 // ---- WebSocket endpoint for MCP ----
 const wss = new WebSocket.Server({ noServer: true });
 
+app.get("/", (req, res) => res.send("MCP WS server ready. Connect via /mcp (WebSocket)."));
 server.on("upgrade", (req, socket, head) => {
   const { pathname, query } = url.parse(req.url, true);
 
