@@ -34,15 +34,18 @@ app.get("/", (_req, res) => {
 });
 
 const server = http.createServer(app);
+
+// IMPORTANT: negotiate subprotocol properly (mcp/jsonrpc)
 const wss = new WebSocket.Server({
   noServer: true,
-  handleProtocols: (protocols /* Set<string> */, req) => {
-    if (protocols.includes('mcp')) return 'mcp';
-    if (protocols.includes('jsonrpc')) return 'jsonrpc';
-    return false; // no match; some clients will still proceed without a subprotocol
+  handleProtocols: (protocols /* Set<string> */, _req) => {
+    if (protocols.includes("mcp")) return "mcp";
+    if (protocols.includes("jsonrpc")) return "jsonrpc";
+    return false; // no supported subprotocol
   }
 });
-// --- WebSocket upgrade handler; accept "/" and "/mcp" and negotiate subprotocol
+
+// --- WebSocket upgrade handler; accept "/" and "/mcp"
 server.on("upgrade", (req, socket, head) => {
   const { pathname, query } = url.parse(req.url, true);
 
@@ -63,34 +66,10 @@ server.on("upgrade", (req, socket, head) => {
     }
   }
 
-  // --- Subprotocol negotiation (important for MCP clients) ---
-  const requested = (req.headers["sec-websocket-protocol"] || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  // Prefer 'mcp', then 'jsonrpc', else echo nothing (some clients don't require it)
-  const chosen =
-    requested.includes("mcp") ? "mcp" :
-    requested.includes("jsonrpc") ? "jsonrpc" :
-    undefined;
-
-  // When a subprotocol is chosen, we must include it in the upgrade response.
+  // Rely on handleProtocols to set Sec-WebSocket-Protocol
   wss.handleUpgrade(req, socket, head, (ws) => {
-    // Monkey-patch the protocol on the ws object so downstream can read ws.protocol
-    if (chosen) ws.protocol = chosen;
     wss.emit("connection", ws, req);
   });
-
-  // If you want to explicitly send chosen subprotocol in response headers, use:
-  // NOTE: The 'ws' package does not expose a direct API to set headers here,
-  // but most clients accept this implicit selection. If you need strict echoing,
-  // switch to the 'handleProtocols' option on WebSocket.Server:
-  // const wss = new WebSocket.Server({
-  //   noServer: true,
-  //   handleProtocols: (protocols, req) => (protocols.includes('mcp') ? 'mcp' :
-  //                                        protocols.includes('jsonrpc') ? 'jsonrpc' : false)
-  // });
 });
 
 // ---- Helpers
@@ -135,9 +114,10 @@ function computeKpis(rows) {
 
 // ---- MCP session
 wss.on("connection", (ws) => {
+  // Keep-alive (some proxies are strict)
   const pingIv = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) ws.ping();
-  }, 30000);
+  }, 15000);
   ws.on("close", () => clearInterval(pingIv));
   ws.on("error", () => {});
 
@@ -158,9 +138,17 @@ wss.on("connection", (ws) => {
         const result = {
           protocolVersion: "2024-11-05",
           serverInfo: { name: "proximus-mcp", version: "1.0.0" },
+          // advertise tools capability
           capabilities: { tools: {} }
         };
         ws.send(jsonrpcResult(id, result));
+
+        // Notify client we're ready (JSON-RPC notification; no id)
+        ws.send(JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/initialized",
+          params: { ready: true }
+        }));
         return;
       }
 
