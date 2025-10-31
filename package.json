@@ -1,5 +1,5 @@
 {
-  "name": "proximus-mcp-server",
+  "name": "proximus-mcp-ws",
   "version": "1.0.0",
   "type": "commonjs",
   "scripts": {
@@ -8,6 +8,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "ws": "^8.18.0"
   }
 }
